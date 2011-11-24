@@ -1,0 +1,8 @@
+; $Id: mm_dtv.info,v 0.1 2009/4/21 LisaH Exp $
+name = Media Mover DTV
+description = "Media Mover for DTV stuff"
+package = "dtv dev"
+dependencies[] = media_mover_api
+dependencies[] = content
+core=6.x
+

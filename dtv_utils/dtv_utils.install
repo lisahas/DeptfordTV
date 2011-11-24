@@ -1,0 +1,23 @@
+<?php
+/*
+ * creates a table to track which user has downloaded which file for which project.
+ * later should convert this to using the schema hook properly
+ */
+
+function dtv_utils_install() {
+  $ret = array();
+  
+  $query = "CREATE TABLE IF NOT EXISTS {download_tracker} (
+  nid int(10) unsigned NOT NULL default '0',
+  fid int(10) unsigned NOT NULL,
+  uid int(10) unsigned NOT NULL,
+  `timestamp` int(11) NOT NULL,
+  vid int(10) unsigned NOT NULL,
+  PRIMARY KEY  (nid,fid,uid)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8 COLLATE utf8_general_ci";
+  
+  $ret[] = update_sql($query);
+
+  return $ret;
+}
+?>

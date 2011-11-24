@@ -1,0 +1,343 @@
+<?php
+// $Id$
+
+/**
+ * This file contains the integration between Media Mover and CCK
+ * Options for harvesting from and storing to are provided
+ * 
+ * 
+ */
+
+
+define(MM_DTV_STORE, 1);
+define(MM_DTV_COMPLETE, 2);
+define(MM_DTV_HARVEST, 3);
+
+//put the vid of the vocab you want tags added to here
+define(TAGGING_VID, 1);
+
+//define a text for the node body of bulk uploaded files
+define(DEFAULT_BODY_TEXT, 'Put your description here');
+
+//put the full path to the chrooted dropbox here.  inside will be subdirs of our users.
+define(MM_DTV_DROPBOX, 'xxx');
+/**
+ * Implementation of media_mover hook
+ * @param string $op
+ *   is the operator to return
+ * @param int $action
+ *   action id that is being called
+ * @param array $configuration is the specific configuration saved for the action for this configuration
+ * @param array $file
+ *   is the file in use
+ * @param array $running_config
+ *   is the full configuration data currently running
+ * @param int $nid
+ *   special param for processing individual nodes
+ */
+function mm_dtv_media_mover($op, $action = null, $configuration = null, &$file = array(), $running_config = null, $nid = null) {
+  if (module_exists('content')) {
+    switch ($op) {
+      case 'name':
+        return t('Media Mover DTV custom uploader');
+
+      case 'actions':
+        return array(
+          'storage' => array(MM_DTV_STORE => t('Save uploaded files')),
+          'complete' => array(MM_DTV_COMPLETE => t('Save the files nicely attached to nodes')),
+          'harvest' => array(MM_DTV_HARVEST => t('Get files from the dropbox, in directories by drupal uid')),
+        );
+
+      case 'config':
+        /*
+        switch ($action) {
+          case MM_DTV_COMPLETE:
+          case MM_DTV_STORE:
+            return mm_dtv_config_save_node($action, $configuration, $configuration['verb']);
+        }
+        */
+        break;
+
+      case 'harvest':
+
+        if ($action == MM_DTV_HARVEST) {
+          return mm_dtv_harvest($action, $configuration, $running_config, $nid);
+        }
+        break;
+
+      case 'storage':
+        switch($action) {
+          case MM_DTV_STORE :
+             return mm_dtv_node_save($action, $configuration, $file);
+           break;
+        }
+
+        break;
+        
+        case 'complete':
+         switch($action) {
+          case MM_DTV_COMPLETE :
+             return mm_dtv_complete($file);
+           break;
+        }
+
+        break;
+
+      case 'delete':
+        return dtv_node_and_file_delete($file, $nid);
+        break;
+      }
+    }
+  }
+
+
+/**
+ * Save to the CCK field
+ * @param int $action
+ *   action id that is being run
+ * @param array $configuration
+ *   the configuration array
+ * @param array $file
+ *   media mover file array
+ * @return string
+ *   new file location
+ */
+function mm_dtv_node_save($action, $configuration, &$file) {
+  
+  // get the path to the file to operate on. We need this to pass out of the function
+  $file_path = media_mover_api_config_current_file($file);
+
+  global $user;
+  
+  // start building the node
+  $node = new STDClass();
+  // set node type
+  $node->type = 'video';
+
+  $filename = array_pop(explode('/', $file['harvest_file']));
+  $node->title = $filename;
+
+  
+ 
+  
+  //get teh uid from the file path
+  $node->uid = mm_dtv_get_uid_from_path($file['harvest_file']);
+  
+
+  
+  $field = content_fields('field_video_file', 'video');
+  $validators = array_merge(filefield_widget_upload_validators($field));
+  //now add unique filename validator
+  $validators['dtv_validate_filename'] = array($filename);
+
+  //make sure this is writeable by whoever runs the script, www or root or whatever
+  $destination_path = mm_dtv_files_destination_path($file);
+
+  if (!$new_file = field_file_save_file($file_path, $validators, $destination_path)) {
+    watchdog('MM DTV', 'Could not save file', null, WATCHDOG_ERROR);
+    return false;
+  }
+  
+
+  else {
+  
+  
+  $node->status = 1;
+  $node->field_video_file[0] = $new_file;
+  
+ //get the metadata
+ //TODO: check for file extension before doing this
+  $id3_tags = mm_dtv_get_metadata($file_path);
+  
+  
+ //set node body from description
+   $node->body = $id3_tags['comment'][0];
+
+
+  node_save($node);
+  // clear the cache
+  
+  //set taxonomy terms here from the id3tags  as we have the nid
+ // $terms = $terms['tags'];   this should handle freetagging ok, might need to specify the vid
+ // taxonomy_node_save($node, $terms);
+ 
+  
+  watchdog('DTV Media Mover Node', 'Created node: !node', array('!node' => l(t($node->title),'node/'. $node->nid)));
+  //don't seem to need this
+  //cache_clear_all('content:'. $node->nid .':'. $node->vid, 'cache_content');
+  
+  //giving this its own function as we'll most likely use it in manual (web) upload aswell
+  //nned to do it after a node_save as we need to set taxonomy
+   //TODO: check for file extension before doing this
+  mm_dtv_set_metadata($node, $id3_tags);
+  
+    //set taxonomy term here as we have the nid
+ // $terms = $terms['tags'];   this should handle freetagging ok, might need to specify the vid
+ // taxonomy_node_save($node, $terms);
+ 
+  
+  
+  
+  //completing the $file object in the way that media mover likes
+  $file['storage_file']=$new_file['filepath'];
+  $file['complete_file']=$new_file['filepath'];
+  $file['nid'] = $node->nid;
+  $file['fid'] = $new_file['fid'];  //nb this is not yet being stored, error in mm api update file function
+  return $new_file['filepath'];
+  }
+
+}
+
+function mm_dtv_harvest($action, $configuration, $running_config, $nid)  {
+  //needs to return an array of harvestable files ie. needs to take a base dir, look in sub dir and return them 
+  //with file['harvest_file'] set.
+  //then need to alter the node_save function to use the harvest_file data, and get the uid from the filepath
+   $files = array();
+   $file_paths = file_scan_directory(MM_DTV_DROPBOX, '/*');
+
+   //work out which ones we want
+   foreach($file_paths as $path)  {
+     $file = array();
+     if(is_numeric(mm_dtv_get_uid_from_path($path->filename))) {
+        $file['filepath'] = $path->filename;
+        $file['harvest_file'] = $path->filename;
+        $files[] = $file;
+     }
+     
+   }
+  //filter out files we've already uploaded
+  $query = 'select * from {media_mover_files}';
+  $result = db_query($query);
+  while ($row = db_fetch_array($result))  {
+    foreach($files as $key => $file)  {
+       if($row['harvest_file'] == $file['harvest_file']) {
+           unset($files[$key]);
+       }   
+    }
+  }
+  return $files;
+}
+
+//TODO finish this when a better record has been made in mm_mover table
+function dtv_node_and_file_delete($file) {
+  //will need to node_delete adn remove from mm_files table though this might happen anyway
+}
+
+
+
+function mm_dtv_complete(&$file)  {
+  //fixing up the file data in mm_files table as this doesn't have the fid as it is missing from update function
+  $fid = db_result(db_query('SELECT field_video_file_fid FROM {content_type_video} WHERE nid = %d', $file['nid']));
+  db_query("UPDATE {media_mover_files} SET fid = '%d' WHERE mmfid ='%d'", $fid, $file['mmfid']);
+  return $file['storage_file']; 
+}
+
+/**
+ * Set the destination path
+ * we'll make this more complicated later when we have our formula for file paths
+ *
+ */
+
+function mm_dtv_files_destination_path($file) {
+  $base = file_directory_path() .'/'. 'video/';
+  $ctime = filectime($file['harvest_file']);
+  $formatted_ctime = date('Y-m', $ctime);
+  $dest_dir = $base . $formatted_ctime;
+  //check if it exists and is writeable, otherwise create it
+  file_check_directory($dest_dir, 1);
+  return $dest_dir;
+}
+
+
+
+function mm_dtv_get_uid_from_path($path) {
+   $path_parts = array_slice(explode('/', $path), -2);
+   return $path_parts[0];
+}
+
+/*
+ * returns array like this:
+ * use to populate nodes. need to find convention for lat and long, free tags and creation date
+ * Array
+(
+    [artist] => Array
+        (
+            [0] => AUTHOR(S) ARTIST(S)
+        )
+
+    [writer] => Array
+        (
+            [0] => GPS DATA
+        )
+
+    [album] => Array
+        (
+            [0] => KEYWORDS (free tagging)
+        )
+
+    [creation_date] => Array
+        (
+            [0] => 2008
+        )
+
+    [comment] => Array
+        (
+            [0] => COMMENT, short description
+        )
+
+    [title] => Array
+        (
+            [0] => PROJECT TITLE
+        )
+
+    [genre] => Array
+        (
+            [0] => 
+        )
+
+)
+ * 
+ */
+
+
+function mm_dtv_get_metadata($file_path)  {
+  $info = getid3_analyze($file_path);
+  $useful_tags = $info['tags']['quicktime'];
+  $useful_tags['genre']= $info['quicktime']['comments']['genre'];
+  return $useful_tags;
+}
+
+/*
+ * setting and saving metadata to node, including taxonomy which is why we have to do this after a node_save
+ */
+function  mm_dtv_set_metadata(&$node, $id3_tags) {
+   $node->field_video_original_author[0]['value'] = $id3_tags['artist'][0];
+   $coords = mm_dtv_get_coords($id3_tags['writer'][0]);
+   $node->locations[0]['latitude'] = $coords['lat'];
+   $node->locations[0]['longitude'] = $coords['long'];
+   $node->field_video_creation_date[0]['value'] = $id3_tags['creation_date'][0];
+   //setting this in node save as a bit neater
+   //  $node->body = $id3_tags['comment'][0];
+   $node->field_project_title[0]['value'] = $id3_tags['title'][0];
+   
+   //finally the tags. need to follow a formula to get these in right.  assuming comma-separated
+   $tags = $id3_tags['album'][0];
+   $terms = array('tags' => array(TAGGING_VID => $tags)
+                 );  
+   taxonomy_node_save($node, $terms);
+   node_save($node);
+   
+   watchdog('DTV Media Mover Node', 'Added metadata to node: !node', array('!node' => l(t($node->title),'node/'. $node->nid)));
+  
+   cache_clear_all('content:'. $node->nid .':'. $node->vid, 'cache_content');
+}
+
+//assumes that data has been added in form lat,long
+function mm_dtv_get_coords($comma_seperated) {
+  $coords = array();
+  $exploded = explode(',', $comma_seperated);
+  $coords['lat'] = trim($exploded[0]);
+  $coords['long'] = trim($exploded[1]);
+  return $coords;
+  
+}

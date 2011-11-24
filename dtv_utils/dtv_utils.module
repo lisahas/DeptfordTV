@@ -1,0 +1,663 @@
+<?php
+
+//set the subdirectories of the filed directory we'll need.
+//here its hardcoded to the path set in the filefield module config.  
+//TODO make this dynamic from var_get or whatever our file naming scheme is.
+define('VIDEO_FILEFIELD_PATH', 'video/');
+define('TMP_PATH', 'tmp/');
+//the time in minutes after which tmp files (archives) will be deleted from the tmp dir by cron
+define('TMP_FILES_EXPIRE', 120);
+
+function  dtv_utils_nodeapi(&$node, $op, $a3 = NULL, $a4 = NULL)   {
+  
+  
+   if ($node->type == 'project' AND $op == 'view')  {
+     //only show the button on a whole page view
+     if($a4) {
+       //finally, only show the button if the user has the right permission
+       if(user_access('download project archive')) {
+         $node->content['archiver_form']['#weight'] = 100;
+         $node->content['archiver_form']['#value'] = "<p>" .  drupal_get_form('dtv_utils_archiver_button') . "</p>";
+       } 
+
+       //add an indicator of the cinelerra version
+       //TODO use the function for this
+       if(isset($node->field_xml_content[0]['value'])) {
+         $initial_chunk = substr($node->field_xml_content[0]['value'], 0, 100);
+         $pattern = '#<EDL\sVERSION=\"?(\S*)\"?\s#';
+         preg_match($pattern, $initial_chunk, $matches);
+         $cinelerra_version = $matches[1];
+         $cinelerra_version = trim($cinelerra_version, '"');
+         if($cinelerra_version)  {
+           $node->content['cinelerra_version']['#value'] = '<p><b>This project is for Cinelerra version: ' . $cinelerra_version .
+             '. You can only edit this project with the same version of Cinelerra.</b></p>';
+           $node->content['cinelerra_version']['#weight'] = -100;
+         }
+         else {
+           $node->content['cinelerra_version']['#value'] = '<p><b>This project is for Kdenlive: You can only edit this project with Kdenlive.</b></p>';
+           $node->content['cinelerra_version']['#weight'] = -100;
+         }
+       }
+    } 
+  }
+
+
+  //TODO: it will be much better to do this in form_alter as then maybe we can rebuild the node form better?
+  //we just need to solve it with the ahah thing
+
+ 
+  //get the file object for uploading files and validate them for uniqueness.  
+ 
+  if($op == 'validate')  {
+    
+    //find out if this is an edited node or a new node by testing for the nid.
+    //TODO there must be a nicer way to do this ;)
+  //if the node is new, validate for unique filename
+  if(empty($a3['nid']['#value']))  {
+    switch ($node->type) {
+      
+      case 'video' :
+        $file = $node->field_video_file[0];
+        $field = 'field_video_file';
+        break;
+      case 'image' :
+        $file = $node->field_image_file[0];
+        $field = 'field_image_file';
+        break;
+      case 'audio' :
+        $file = $node->field_audio_file[0];
+        $field = 'field_audio_file';
+        break;
+    }
+    //wrap this in an isset in case its not a media file we're validating
+    if(isset($file)) {
+      $errors = dtv_validate_filename($file);
+      if(!empty($errors))  {
+        form_set_error($field, $errors[0]);
+      }
+    }
+  }
+  
+}
+
+
+
+
+ //add nice download buttons for node types that need them  and
+ //the ogg player for firefox.  TODO: make this tidier, one switch or something
+ //only on a full page view...
+ if($op == 'view' AND $a4 === true)  {
+   
+   //find out if we should be showing the ogg player
+   $show_ogg_player = false;
+   $user_agent = array_pop(explode(' ',$_SERVER['HTTP_USER_AGENT']));
+   $parts = explode('/', $user_agent);
+   $browser = strtolower(trim($parts[0]));
+   $version = trim($parts[1]);
+   preg_match('#\d\.\d#', $version, $matches);
+   $version = $matches[0];
+   if($browser == 'firefox' AND $version >= 3.1) {
+     $show_ogg_player = true;
+   }
+   
+   switch ($node->type) {
+     
+     case 'video': 
+       
+       $extension = trim(array_pop(explode('.', $node->field_video_file[0]['filename'])));
+       if($show_ogg_player AND $extension == 'ogv') {
+         //do an embed tag for ogg video players. later we will do this at theme layer
+         $link = t('<video src="'. base_path() . $node->field_video_file[0]['filepath'] . '" controls = "true">if you had firefox 3.5 you 
+   	     would see a ogg player here ;) </video><br>');
+         $node->content['ogv_embed']['#value'] = $link;
+         $node->content['ogv_embed']['#weight'] = 5;
+       }
+       if(user_access('download clip'))  {
+          $node->content['download_link']['#weight'] = 100;
+          $node->content['download_link']['#value'] = l('Download File', $node->field_video_file[0]['filepath']);
+       }
+       break;
+
+ 
+     case 'image' :
+       
+       if(user_access('download clip'))  {
+         $node->content['download_link']['#weight'] = 100;
+         $node->content['download_link']['#value'] = l('Download File', $node->field_image_file[0]['filepath']);
+       }
+  
+     case 'audio':
+       
+       $extension = trim(array_pop(explode('.', $node->field_audio_file[0]['filename'])));
+       if($show_ogg_player AND $extension == 'ogg') { 
+         //do an embed tag for ogg audio player. later we will do this at theme layer
+         $link = t('<br><br><p><audio src="'. base_path() . $node->field_audio_file[0]['filepath'] . '" controls = "true">if you had firefox 3.5 you 
+   	     would see a ogg player here ;) </audio></p>');
+         $node->content['ogg_embed']['#value'] = $link;
+         $node->content['ogg_embed']['#weight'] = 5;
+       }
+      if(user_access('download clip'))  {
+        $node->content['download_link']['#weight'] = 100;
+        $node->content['download_link']['#value'] = l('Download File', $node->field_audio_file[0]['filepath']);
+      }
+      break;
+      
+     default:
+     break;
+   } //end switch
+ }//end if view
+ 
+ //make sure fields are filled out, then the node can become published
+ if($op == 'presave') {
+   /*
+   $asset_types = array('audio', 'video', 'image');
+   if(in_array($node->type, $asset_types)) {
+   
+     $content_type_info = content_types($node->type);
+     $content_fields = array_keys($content_type_info['fields']);
+     //these are cck fields we don't want to test.
+     $exclusions = array('field_additional_users', 
+   						'field_image_file',
+                        'field_audio_file',
+                        'field_video_file', 
+                        'field_video_original_author',
+                        'field_audio_original_author',
+                        'field_image_original_author');
+     $complete = true;
+     if($node->body == DEFAULT_BODY_TEXT)  {
+       $complete = false;
+     }
+
+     if(empty($node->taxonomy['tags'][1])) {
+       $complete = false;
+     }
+   
+     foreach($content_fields as $key => $field)  {
+     //we need to ignore fields that are the file uploads, and other fields
+           foreach($node->$field as $content) {
+             if(!in_array($field, $exclusions)) {
+               if(!isset($content['value'])) {
+                 $complete = false;
+             }
+           }
+         }
+      }
+    
+      if($node->type == 'video') {
+        if(($node->locations[0]['locpick']['user_latitude']=='') OR ($node->locations[0]['locpick']['user_longitude']=='')) {
+          $complete = false;
+        }
+      }
+   
+     //we only unpublish nodes
+      if(!$complete)  {
+        $node->status = 0;
+      }
+    } //end if in_array nodetypes
+   */
+  } //end presave op
+  
+ 
+}//end node_api function
+
+
+
+/*
+ * implementation of hook perm.
+ * 
+ * define permissions for who can access the downloader script
+ */
+
+function dtv_utils_perm()  {
+  return array('download project archive', 'download clip');
+}
+
+/*
+ * hook menu
+ * create a tab on each users page so they can clear thier download history
+ */
+
+function dtv_utils_menu($may_cache = false)  {
+  
+  $items = array();
+  
+  $items['user/%/downloads'] = array(
+    'title' => 'Download History',
+    'page callback' => '_dtv_clear_download_history',
+    'page arguments' => array(1),
+    'access callback' => '_dtv_access_download_history',
+    'access arguments' => array(1),
+    'weight' => 10,
+    'type' => MENU_LOCAL_TASK
+     );
+
+   //the url for the text only view
+   $items['clips/raw-text'] = array(
+    'title' => 'Raw text clips list',
+    'page callback' => '_dtv_raw_text_clips_list',
+    'access callback' => 'user_access',
+    'access arguments' => array('access content'),
+    'weight' => 10,
+    'type' => MENU_CALLBACK
+     );
+   return $items;
+}
+
+function _dtv_clear_download_history()  {
+  $output = '';
+  $output .= t('<p>This system keeps track of downloads you make for each project.  If you wish to clear your download history so 
+  that project archives that you download will have all the files you need, press the button below.<p>');
+  $output .= drupal_get_form('_dtv_utils_clear_downloads_button');
+  return $output; 
+}
+
+//a way of outputting the raw clips list without superflous stuff
+function _dtv_raw_text_clips_list()  {
+  $view = views_get_view('raw_clips_list');
+  $view->preview();
+  foreach($view->result as $result) {
+    $file = field_file_load($result->node_data_field_video_file_field_video_file_fid);
+   // print $file['filename'] . "\n";
+    print 'http://' . $_SERVER['SERVER_NAME'] . base_path(). check_plain($file['filepath']) . "\n";
+  }
+  return;
+}
+
+//only users with access to the download button,
+//and the logged in user is the uid
+function _dtv_access_download_history() {
+  global $user;
+  return user_access('download project archive') AND (arg(1)==$user->uid);
+  
+}
+
+function _dtv_utils_clear_downloads_button_submit($form, &$form_state) {
+  $query = 'DELETE FROM {download_tracker} WHERE uid = %d';
+  if(db_query($query, arg(1)))  {
+    watchdog('download tracker', 'user '. arg(1) . ' cleared downloads successfully');
+    drupal_set_message(t('Your download history has been cleared'));
+  }
+  else {
+    watchdog('download tracker', 'user '. arg(1) . ': error clearing downloads', 'error');
+    drupal_set_message(t('There was an error clearing your download history. Please report this to an admin', 'error'));
+  }
+  
+}
+
+/*
+ * Implementation of Hook Cron
+ * Cleans up the temp location of archives
+ * 
+ * We might also need to clean the dropbox...???
+ */
+function dtv_utils_cron()  {
+  $errors = array();
+  $tmp_path =  trim(file_directory_path() . '/' . TMP_PATH, '/');
+  $file_paths = file_scan_directory($tmp_path, '/*', array('.', '..', 'CVS', '.svn'), 0, FALSE);
+  foreach($file_paths as $file) {
+    $name_parts = explode('_', $file->basename);
+    $file_timestamp = $name_parts[0];
+    //calculate the expiry time in seconds
+    $expire = TMP_FILES_EXPIRE * 60;
+    $now = time();
+    $limit = $now - $expire;
+    if($file_timestamp < $limit)  {
+      if(is_file($file->filename))  {
+          if(!unlink($file->filename)) {
+            $errors[] = 'Error removing file :' . $file->filename;
+          }
+      }
+      elseif (is_dir($file->filename)) {
+        //we need to descend into the directory, delete each file and then delete the directory
+        $dir_files = file_scan_directory($file->filename, '/*', array('.', '..', 'CVS', '.svn'), 0, FALSE);
+        foreach($dir_files as $dir_file) {
+          if(!unlink($dir_file->filename)) {
+            $errors[] = 'Error removing file :' . $dir_file->filename;
+          }
+        }
+        if(!rmdir($file->filename)) {
+           $errors[] = 'Error removing directory :' . $file->filename;
+        }
+      }
+    } 
+  }
+  if(!empty($errors)) {
+    $watchdog_entry = implode(', ', $errors);
+    watchdog('DTV UTILS CRON', "errors: $watchdog_entry", null, WATCHDOG_ERROR);
+  }
+  else {
+    watchdog('DTV UTILS CRON', 'dtv cron ran with no errors');
+  }
+}
+
+/*
+ * This can take a file object or a simple filename string.
+ * 
+ * set the $present flag to true if you want to return errors if the file is present in the system.
+ * set the $present flag to false if you want to return errors if the file is not present in the system 
+ * (eg. for validating xml project files)
+ * 
+ * 
+ */
+function dtv_validate_filename($file, $present = true)  {
+  if(is_string($file)) {
+    $fileObj = new stdClass();
+    $fileObj->filename = $file;
+  }
+  else {
+     $fileObj = (object) $file;
+  }
+  $filename = $fileObj->filename;
+  //status must be 1 because filefield has already put a file in the table with status = 0
+  $query = "select count(*) num from {files} where filename = '%s' and status = 1";
+  $result = db_fetch_array(db_query($query, $filename));
+  $num_files = $result['num'];
+  
+  if($num_files AND $present) {
+      $errors[] = t('filename ' . $filename .  ' was not unique. File not uploaded');
+  }
+  if(!$num_files AND !$present) {
+     $errors[] = t('filename ' . $filename .  ' is not present in the system');
+  }
+  return $errors;
+}
+
+
+//NEXT TO DO:  move the validation here.  add a custom destination path function to submit, maybe
+//by unsetting the file-field submit function 
+function dtv_utils_form_alter(&$form, $form_state, $form_id)  {
+  /*nb this one is not working yet
+  if($form_id == 'video_node_form') {
+    $form['#validate'][]= 'dtv_validate_filename_form';
+    $form['#submit'][]= 'dtv_submit_file_form';
+  }
+  */
+  
+  if($form_id == 'project_node_form')  {
+    $form['#validate'][] = 'dtv_validate_xml';
+    $form['#submit'][]= 'dtv_submit_xml';
+  }
+  
+  //unsetting the file upload form field on an update so that no new file can be uploaded.
+  //this is the twin of the nodeapi insert hook that checks for unique filenames
+  //TODO; tidy this code
+  if($form_id == 'image_node_form') { 
+    if($form['nid']['#value'])  {
+      $form['image_file_link']['#value'] = t('<b>Filename: </b><br />' . $form['#node']->field_image_file[0]['filename']);
+      $form['image_file_link']['#weight'] = -4;
+      $form['field_image_file'][0]['#access'] = false;
+    }
+  }
+  
+  if($form_id == 'video_node_form') { 
+    //in the case of video, you never see the web-based upload form
+    //but in this version, only if its an update not an insert
+    if($form['nid']['#value'])  {
+      $form['field_video_file'][0]['#access'] = false;
+      $form['video_file_link']['#value'] = t('<b>Filename: </b><br/>' . $form['#node']->field_video_file[0]['filename']);
+      $form['video_file_link']['#weight'] = -4;
+    }
+    $form['#submit'][]= 'dtv_submit_video_file';
+  }
+ 
+  
+  if($form_id == 'audio_node_form') { 
+    if($form['nid']['#value'])  {
+      $form['audio_file_link']['#value'] = t('<b>Filename: </b><br />' . $form['#node']->field_audio_file[0]['filename']);
+      $form['audio_file_link']['#weight'] = -4;
+      $form['field_audio_file'][0]['#access'] = false;
+    }
+  }
+}
+
+/*
+ * Reads the contents of the uploaded file into the xml_content field of the node
+ * 
+ */
+function dtv_submit_xml($form, &$form_state)  {
+  //reading into the node field from the uploaded file
+  //dprint_r($form_state);
+  $file_path = $form_state['values']['field_xml_link'][0]['filepath'];
+  $file_contents = file_get_contents($file_path);
+  //now make node-reference fields for assets
+  $parser = new xmlParser();
+  //get an array of nids from the assets, ie the nids of the asset container nodes
+  $assets = $parser->get_assets_list($file_contents);
+  
+  //unset all the referenced assets so we start again
+  if(isset($form_state['values']['field_referenced_assets']))  {
+    unset($form_state['values']['field_referenced_assets']);
+  }
+  //add the assets to the node ref field
+  foreach($assets as $asset) {
+    $form_state['values']['field_referenced_assets'][]=array('nid'=>$asset);
+  }
+  
+  //finally write the contents of the file into the node xml_content field
+  $form_state['values']['field_xml_content'][0]['value'] = $file_contents;
+}
+
+/*
+ * Checks that any assets listed in the xml file have been uploaded into the system
+ * TODO sort out highlighting the correct bit of the form for the error
+ * 
+ */
+
+function dtv_validate_xml($form, &$form_state)  {
+  include_once('archiver_classes/dtv_version_downloader.php');
+  $file_path = $form_state['values']['field_xml_link'][0]['filepath'];
+  $file_contents = file_get_contents($file_path);
+  $parser = new xmlParser();
+  $assets = $parser->asset_list_full_unique($file_contents);
+  $errors = '';
+  //first check for full paths, if there are slashes in any paths, we reject them
+  if(dtv_utils_check_xml_type($file_contents) != 'kdenlive') {
+   foreach($assets as $asset)  {
+    if(strstr($asset, '/')) {
+      $errors .= t("file $asset has an incorrect path in your xml file. <br />");
+    }
+   }
+  }
+  if($errors != '') {
+     form_set_error('field_xml_link', $errors . t('<br>For information on how to correct this see ' . 
+     l('file path help page', 'filepathhelp')));
+     return;
+  }
+  //next we check that these files exist in the files table
+  foreach($assets as $asset)  {
+    if($error = dtv_validate_filename($asset, false)) {
+        $errors .= implode(',', $error) . t('<br>');
+    }
+  }
+  if($errors != '') {
+     form_set_error('field_xml_link', $errors . t('<br>You must upload these files before submitting the xml file.'));
+  }
+}
+
+
+//not doing anything yet
+function dtv_validate_filename_form($form, &$form_state)  {
+    $field = 'field_image_file';
+    $errors = dtv_validate_filename($form_state[$field][0]);
+    if(!empty($errors))  {
+        form_set_error($field, $errors[0]);
+    }
+  
+}
+
+//using this to set node info from mp4 files  if its an mp4 files on web upload
+function dtv_submit_video_file($form, &$form_state)  {
+  $video_file = $form_state['values']['field_video_file'][0];
+  $name_array = explode('.', $video_file['filename']);
+  $extn = array_pop($name_array);
+  if($extn == 'mp4')  {
+   
+   $id3_tags = mm_dtv_get_metadata($video_file['filepath']);
+
+
+   if (isset($id3_tags['artist'][0]) && isset($id3tags['album'][0])) {
+      //set the values in the form TODO: put this into a presave with nodeapi so its the same for media mover and web-based uploads
+     $form_state['values']['field_video_original_author'][0]['value'] = $id3_tags['artist'][0];
+     $coords = mm_dtv_get_coords($id3_tags['writer'][0]);
+     $form_state['values']['locations'][0]['locpick']['user_latitude'] = $coords['lat'];
+     $form_state['values']['locations'][0]['locpick']['user_longitude'] = $coords['long'];
+     $form_state['values']['field_video_creation_date'][0]['value'] = $id3_tags['creation_date'][0];
+     //maybe this could become node->body???
+     $form_state['values']['field_video_comment'][0]['value'] = $id3_tags['comment'][0];
+     $form_state['values']['field_project_title'][0]['value'] = $id3_tags['title'][0];
+     
+     //finally the tags. need to follow a formula to get these in right.  assuming comma-separated
+     $form_state['values']['taxonomy']['tags'][1] = $id3_tags['album'][0];
+   }   
+  }
+  
+}
+
+//we will need to use this to move the file, or maybe neater
+//unset the file_field_save submit function and write own one
+function dtv_submit_file_form($form, &$form_state)  {
+     // dprint_r('submitting');
+   // dprint_r($form_values);
+  
+}
+
+function _dtv_utils_clear_downloads_button() {
+    
+  $form['clear_downloads'] = array(
+    '#type' => 'submit',
+    '#value' => t('clear my downloads'),
+  //TODO work out how to redirect after submission
+    '#redirect' => 'back to node here'
+  
+    );
+    
+    return $form;
+  
+}
+
+function dtv_utils_archiver_button()  {
+  
+  //TODO work out more elegant form that will send nid, uid and vid
+  $form['get_archive'] = array(
+    '#type' => 'submit',
+    '#value' => t('get the files for this revision'),
+  //TODO work out how to redirect after submission
+    '#redirect' => 'back to node here'
+  
+    );
+    
+    return $form;
+}
+
+
+
+function dtv_utils_archiver_button_submit($form, &$form_state)  {
+  
+  global $user;
+  $uid = $user->uid;
+  $vid = 0;
+  //TODO error if no valid node found
+  $nid = intval(arg(1));
+  $vid = intval(arg(3));
+  
+  _dtv_utils_get_archive($nid, $vid, $uid);
+  
+}
+
+
+
+
+function _dtv_utils_get_archive($nid, $vid, $uid)  {
+  
+  include_once('archiver_classes/dtv_version_downloader.php');
+  //get the xml via a node_load
+  if ($vid)  {
+    $node = node_load($nid, $vid);
+   }
+  //if no vid then we get the current rev
+  else $node = node_load($nid);
+  $xml_text = $node->field_xml_content[0]['value'];
+  
+  //get downloaded files for this user and this project and put into $users_files array
+  $users_files = array();
+  $query = 'SELECT filename FROM {files}, {download_tracker} 
+  			WHERE download_tracker.nid = %d 
+  			AND download_tracker.uid = %d AND 
+  			download_tracker.fid = files.fid';
+  $query_result = db_query($query, $nid, $uid);
+  while($row = db_fetch_array($query_result))  {
+     $users_files[]=$row['filename'];
+  }
+
+  //set the paths here
+  $media_path = file_directory_path() . '/' . VIDEO_FILEFIELD_PATH;
+  $tmp_path = file_directory_path() . '/' . TMP_PATH;
+  
+  //create a settings obj for these settings
+  //TODO create a constructor for settings to shorten this a bit
+  $settings = new settings();
+  $settings->mediapath = $media_path;
+  $settings->tmp = $tmp_path;
+  
+  $xml_getter = new xmlGetter(false, $settings);
+  
+  //get the timestamp of the file being created, so we can put it in the db
+  $timestamp = $xml_getter->get_timestamp();
+  
+  $xml_getter->get_drupal_xml($xml_text);
+  
+  //TODO: shouldn't need to pass in settings here as xml_getter shoud have correct settings
+   $parser = new xmlParser($xml_getter, $settings);
+    
+   //we get back an array of files transferred
+   //nb change this backfor valid xml
+  // $results = $parser->getAssets($users_files);
+  $results = $parser->getAssetsRegEx($users_files, $xml_text);
+   //generate user messages and db entries for files transferred
+   foreach($results['transferred'] as $result)  {
+    //get the fid
+     foreach ($result as $filename => $fid ) {
+       $query='INSERT INTO {download_tracker} (nid, fid, uid, timestamp, vid) values (%d, %d, %d, %d, %d)';
+       if(db_query($query, $nid, $fid, $uid, $timestamp, $vid))  {
+       drupal_set_message("transferred: $filename", 'status', true);
+       }
+      else {
+        drupal_set_message("error writing record for $result to download table",'error');
+      }
+     }
+   }
+   
+   //generate user messages for files not transferred this tiem
+   foreach($results['not transferred'] as $result)  {
+      drupal_set_message("you should already have got file: $result on your local machine", 'status', true);
+   }
+  
+  //now create an archive of the directory 
+  //TODO don't make an archive if the transfer was unsuccessful in any way( return false from get assets??)
+   $archive = new archiver($xml_getter);
+
+   $archive_url = $archive->makeArchive();
+
+   //do this as drupal set message adn then a drupal goto
+  drupal_set_message("download your archive: <a href=\"" . base_path() ."$archive_url \">here.</a>", 'status', true);
+  //TODO set the redirect properly here(user the $vid if there is one
+  drupal_goto("node/$nid");
+  
+  
+}
+
+//given an xml string, checks the edit type
+function dtv_utils_check_xml_type($xml) {
+        $initial_chunk = substr($xml, 0, 100);
+         $pattern = '#<EDL\sVERSION=\"?(\S*)\"?\s#';
+         preg_match($pattern, $initial_chunk, $matches);
+         $cinelerra_version = $matches[1];
+         $cinelerra_version = trim($cinelerra_version, '"');
+         if($cinelerra_version)  {
+           return $cinelerra_version;
+         }
+         else {
+           return 'kdenlive';
+         }
+}
+
